@@ -11,7 +11,7 @@ from pymongo import MongoClient
 
 # ================== НАСТРОЙКИ ==================
 TOKEN = os.environ["TOKEN"]
-MONGO_URI = os.environ["MONGO_URI"]  # Сюда вставишь ссылку из MongoDB
+MONGO_URI = os.environ["MONGO_URI"]
 
 DEV_ROLE_ID = 1566118227489071344  # Твой ID роли
 LOG_CHANNEL_ID = 1566120795934040314  # Твой ID канала логов
@@ -81,7 +81,6 @@ class KeyTypeView(ui.View):
         return True
 
     async def create_key(self, interaction: discord.Interaction, key_type: str):
-        # Добавляем defer для кнопок тоже
         await interaction.response.defer()
 
         info = KEY_TYPES[key_type]
@@ -99,7 +98,6 @@ class KeyTypeView(ui.View):
             "created_by": str(interaction.user),
             "expires_at": expires_at,
             "userid": None,
-            "hwid": None,
             "banned": False,
             "activated_at": None
         }
@@ -107,7 +105,6 @@ class KeyTypeView(ui.View):
 
         expires_text = "∞" if not expires_at else expires_at[:10]
 
-        # Используем edit_original_response, так как вызвали defer
         await interaction.edit_original_response(
             content=(
                 f"**Ключ создан**\n"
@@ -118,9 +115,7 @@ class KeyTypeView(ui.View):
             view=None
         )
 
-        await send_log(
-            f"[СОЗДАН] `{key}` | {info['label']} | создал: {interaction.user.mention}"
-        )
+        await send_log(f"[СОЗДАН] `{key}` | {info['label']} | создал: {interaction.user.mention}")
 
     @ui.button(label="Tester — ∞", style=discord.ButtonStyle.primary)
     async def tester(self, interaction: discord.Interaction, button: ui.Button):
@@ -152,9 +147,9 @@ def check_key():
     data = request.json or {}
     key = str(data.get("key", "")).strip().upper()
     userid = data.get("userid")
-    hwid = str(data.get("hwid", "")).strip()
 
-    if not key or not userid or not hwid:
+    # Проверяем только наличие ключа и userid (HWID больше не нужен)
+    if not key or not userid:
         return jsonify({"status": "invalid", "reason": "missing_data"})
 
     key_data = get_key(key)
@@ -165,6 +160,7 @@ def check_key():
     if key_data.get("banned"):
         return jsonify({"status": "banned"})
 
+    # Проверка срока
     expires_at = key_data.get("expires_at")
     if expires_at:
         try:
@@ -174,27 +170,19 @@ def check_key():
         except Exception:
             pass
 
-    if key_data.get("hwid") is None:
-        key_data["hwid"] = hwid
+    # --- ПРИВЯЗКА ТОЛЬКО К USERID ---
+    saved_userid = key_data.get("userid")
+
+    if saved_userid is None:
+        # Первая активация: привязываем ключ к аккаунту
         key_data["userid"] = int(userid)
         key_data["activated_at"] = datetime.utcnow().isoformat()
         save_key(key, key_data)
-
-        print(f"[ACTIVATE] {key} -> user {userid} | hwid {hwid[:8]}...")
-
-        return jsonify({
-            "status": "valid",
-            "role": key_data.get("role", "user"),
-            "type": key_data.get("type"),
-            "expires_at": key_data.get("expires_at"),
-            "whitelist": get_whitelist()
-        })
-
-    if key_data.get("hwid") != hwid:
-        return jsonify({"status": "hwid_mismatch"})
-
-    if key_data.get("userid") and int(key_data["userid"]) != int(userid):
-        return jsonify({"status": "userid_mismatch"})
+        print(f"[ACTIVATE] {key} -> user {userid}")
+    else:
+        # Ключ уже активирован: проверяем, тот ли это игрок
+        if int(saved_userid) != int(userid):
+            return jsonify({"status": "userid_mismatch"})
 
     return jsonify({
         "status": "valid",
@@ -222,7 +210,7 @@ async def on_ready():
 
 @bot.tree.command(name="genkey", description="Создать ключ (только dev)")
 async def genkey(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True) # ДОБАВЛЕНО
+    await interaction.response.defer(ephemeral=True)
     if not is_dev(interaction):
         return await interaction.followup.send("Нет доступа. Нужна роль dev.", ephemeral=True)
 
@@ -232,7 +220,7 @@ async def genkey(interaction: discord.Interaction):
 @bot.tree.command(name="ban", description="Забанить ключ")
 @app_commands.describe(key="Ключ")
 async def ban_key(interaction: discord.Interaction, key: str):
-    await interaction.response.defer(ephemeral=True) # ДОБАВЛЕНО
+    await interaction.response.defer(ephemeral=True)
     if not is_dev(interaction):
         return await interaction.followup.send("Нет доступа.", ephemeral=True)
 
@@ -247,7 +235,7 @@ async def ban_key(interaction: discord.Interaction, key: str):
 @bot.tree.command(name="unban", description="Разбанить ключ")
 @app_commands.describe(key="Ключ")
 async def unban_key(interaction: discord.Interaction, key: str):
-    await interaction.response.defer(ephemeral=True) # ДОБАВЛЕНО
+    await interaction.response.defer(ephemeral=True)
     if not is_dev(interaction):
         return await interaction.followup.send("Нет доступа.", ephemeral=True)
 
@@ -259,10 +247,10 @@ async def unban_key(interaction: discord.Interaction, key: str):
     await interaction.followup.send(f"Ключ `{key}` разбанен.", ephemeral=True)
     await send_log(f"[РАЗБАН] `{key}` | {interaction.user.mention}")
 
-@bot.tree.command(name="resethwid", description="Сбросить HWID у ключа")
+@bot.tree.command(name="resethwid", description="Сбросить привязку ключа к аккаунту")
 @app_commands.describe(key="Ключ")
 async def resethwid(interaction: discord.Interaction, key: str):
-    await interaction.response.defer(ephemeral=True) # ДОБАВЛЕНО
+    await interaction.response.defer(ephemeral=True)
     if not is_dev(interaction):
         return await interaction.followup.send("Нет доступа.", ephemeral=True)
 
@@ -270,14 +258,15 @@ async def resethwid(interaction: discord.Interaction, key: str):
     if not get_key(key):
         return await interaction.followup.send("Ключ не найден.", ephemeral=True)
 
-    save_key(key, {"hwid": None, "userid": None, "activated_at": None})
-    await interaction.followup.send(f"HWID ключа `{key}` сброшен.", ephemeral=True)
-    await send_log(f"[RESET HWID] `{key}` | {interaction.user.mention}")
+    # Сбрасываем привязку к UserID
+    save_key(key, {"userid": None, "activated_at": None})
+    await interaction.followup.send(f"Привязка ключа `{key}` сброшена. Можно активировать на другом аккаунте.", ephemeral=True)
+    await send_log(f"[RESET] `{key}` | {interaction.user.mention}")
 
 @bot.tree.command(name="addwl", description="Добавить UserId в вайтлист")
 @app_commands.describe(userid="Roblox UserId")
 async def addwl(interaction: discord.Interaction, userid: str):
-    await interaction.response.defer(ephemeral=True) # ДОБАВЛЕНО
+    await interaction.response.defer(ephemeral=True)
     if not is_dev(interaction):
         return await interaction.followup.send("Нет доступа.", ephemeral=True)
 
@@ -287,14 +276,13 @@ async def addwl(interaction: discord.Interaction, userid: str):
         return await interaction.followup.send("UserId должен быть числом.", ephemeral=True)
 
     wl_col.update_one({"_id": uid}, {"$set": {"_id": uid}}, upsert=True)
-
     await interaction.followup.send(f"Добавлен в вайтлист: `{uid}`", ephemeral=True)
     await send_log(f"[WL +] `{uid}` | {interaction.user.mention}")
 
 @bot.tree.command(name="removewl", description="Убрать из вайтлиста")
 @app_commands.describe(userid="Roblox UserId")
 async def removewl(interaction: discord.Interaction, userid: str):
-    await interaction.response.defer(ephemeral=True) # ДОБАВЛЕНО
+    await interaction.response.defer(ephemeral=True)
     if not is_dev(interaction):
         return await interaction.followup.send("Нет доступа.", ephemeral=True)
 
@@ -309,7 +297,7 @@ async def removewl(interaction: discord.Interaction, userid: str):
 
 @bot.tree.command(name="listwl", description="Показать вайтлист")
 async def listwl(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True) # ДОБАВЛЕНО
+    await interaction.response.defer(ephemeral=True)
     if not is_dev(interaction):
         return await interaction.followup.send("Нет доступа.", ephemeral=True)
 
@@ -320,7 +308,7 @@ async def listwl(interaction: discord.Interaction):
 @bot.tree.command(name="keyinfo", description="Информация о ключе")
 @app_commands.describe(key="Ключ")
 async def keyinfo(interaction: discord.Interaction, key: str):
-    await interaction.response.defer(ephemeral=True) # ДОБАВЛЕНО
+    await interaction.response.defer(ephemeral=True)
     if not is_dev(interaction):
         return await interaction.followup.send("Нет доступа.", ephemeral=True)
 
@@ -333,8 +321,7 @@ async def keyinfo(interaction: discord.Interaction, key: str):
         f"**Ключ:** `{key}`\n"
         f"**Тип:** `{data.get('type')}`\n"
         f"**Роль:** `{data.get('role')}`\n"
-        f"**UserId:** `{data.get('userid')}`\n"
-        f"**HWID:** `{str(data.get('hwid'))[:16] if data.get('hwid') else None}`\n"
+        f"**UserId (привязка):** `{data.get('userid')}`\n"
         f"**Banned:** `{data.get('banned')}`\n"
         f"**Expires:** `{data.get('expires_at') or '∞'}`\n"
         f"**Activated:** `{data.get('activated_at')}`"
