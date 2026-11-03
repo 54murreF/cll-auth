@@ -81,6 +81,9 @@ class KeyTypeView(ui.View):
         return True
 
     async def create_key(self, interaction: discord.Interaction, key_type: str):
+        # Добавляем defer для кнопок тоже
+        await interaction.response.defer()
+
         info = KEY_TYPES[key_type]
         key = generate_key()
         now = datetime.utcnow()
@@ -104,7 +107,8 @@ class KeyTypeView(ui.View):
 
         expires_text = "∞" if not expires_at else expires_at[:10]
 
-        await interaction.response.edit_message(
+        # Используем edit_original_response, так как вызвали defer
+        await interaction.edit_original_response(
             content=(
                 f"**Ключ создан**\n"
                 f"Тип: `{info['label']}`\n"
@@ -161,7 +165,6 @@ def check_key():
     if key_data.get("banned"):
         return jsonify({"status": "banned"})
 
-    # Проверка срока
     expires_at = key_data.get("expires_at")
     if expires_at:
         try:
@@ -171,7 +174,6 @@ def check_key():
         except Exception:
             pass
 
-    # Первая активация
     if key_data.get("hwid") is None:
         key_data["hwid"] = hwid
         key_data["userid"] = int(userid)
@@ -185,10 +187,9 @@ def check_key():
             "role": key_data.get("role", "user"),
             "type": key_data.get("type"),
             "expires_at": key_data.get("expires_at"),
-            "whitelist": get_whitelist() # Берем актуальный вайтлист из базы
+            "whitelist": get_whitelist()
         })
 
-    # Уже активирован — проверяем HWID
     if key_data.get("hwid") != hwid:
         return jsonify({"status": "hwid_mismatch"})
 
@@ -200,7 +201,7 @@ def check_key():
         "role": key_data.get("role", "user"),
         "type": key_data.get("type"),
         "expires_at": key_data.get("expires_at"),
-        "whitelist": get_whitelist() # Берем актуальный вайтлист из базы
+        "whitelist": get_whitelist()
     })
 
 def run_flask():
@@ -221,105 +222,112 @@ async def on_ready():
 
 @bot.tree.command(name="genkey", description="Создать ключ (только dev)")
 async def genkey(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True) # ДОБАВЛЕНО
     if not is_dev(interaction):
-        return await interaction.response.send_message("Нет доступа. Нужна роль dev.", ephemeral=True)
+        return await interaction.followup.send("Нет доступа. Нужна роль dev.", ephemeral=True)
 
     view = KeyTypeView(interaction.user.id)
-    await interaction.response.send_message("Выберите тип ключа:", view=view, ephemeral=True)
+    await interaction.followup.send("Выберите тип ключа:", view=view, ephemeral=True)
 
 @bot.tree.command(name="ban", description="Забанить ключ")
 @app_commands.describe(key="Ключ")
 async def ban_key(interaction: discord.Interaction, key: str):
+    await interaction.response.defer(ephemeral=True) # ДОБАВЛЕНО
     if not is_dev(interaction):
-        return await interaction.response.send_message("Нет доступа.", ephemeral=True)
+        return await interaction.followup.send("Нет доступа.", ephemeral=True)
 
     key = key.strip().upper()
     if not get_key(key):
-        return await interaction.response.send_message("Ключ не найден.", ephemeral=True)
+        return await interaction.followup.send("Ключ не найден.", ephemeral=True)
 
     save_key(key, {"banned": True})
-    await interaction.response.send_message(f"Ключ `{key}` забанен.", ephemeral=True)
+    await interaction.followup.send(f"Ключ `{key}` забанен.", ephemeral=True)
     await send_log(f"[БАН] `{key}` | {interaction.user.mention}")
 
 @bot.tree.command(name="unban", description="Разбанить ключ")
 @app_commands.describe(key="Ключ")
 async def unban_key(interaction: discord.Interaction, key: str):
+    await interaction.response.defer(ephemeral=True) # ДОБАВЛЕНО
     if not is_dev(interaction):
-        return await interaction.response.send_message("Нет доступа.", ephemeral=True)
+        return await interaction.followup.send("Нет доступа.", ephemeral=True)
 
     key = key.strip().upper()
     if not get_key(key):
-        return await interaction.response.send_message("Ключ не найден.", ephemeral=True)
+        return await interaction.followup.send("Ключ не найден.", ephemeral=True)
 
     save_key(key, {"banned": False})
-    await interaction.response.send_message(f"Ключ `{key}` разбанен.", ephemeral=True)
+    await interaction.followup.send(f"Ключ `{key}` разбанен.", ephemeral=True)
     await send_log(f"[РАЗБАН] `{key}` | {interaction.user.mention}")
 
 @bot.tree.command(name="resethwid", description="Сбросить HWID у ключа")
 @app_commands.describe(key="Ключ")
 async def resethwid(interaction: discord.Interaction, key: str):
+    await interaction.response.defer(ephemeral=True) # ДОБАВЛЕНО
     if not is_dev(interaction):
-        return await interaction.response.send_message("Нет доступа.", ephemeral=True)
+        return await interaction.followup.send("Нет доступа.", ephemeral=True)
 
     key = key.strip().upper()
     if not get_key(key):
-        return await interaction.response.send_message("Ключ не найден.", ephemeral=True)
+        return await interaction.followup.send("Ключ не найден.", ephemeral=True)
 
     save_key(key, {"hwid": None, "userid": None, "activated_at": None})
-    await interaction.response.send_message(f"HWID ключа `{key}` сброшен.", ephemeral=True)
+    await interaction.followup.send(f"HWID ключа `{key}` сброшен.", ephemeral=True)
     await send_log(f"[RESET HWID] `{key}` | {interaction.user.mention}")
 
 @bot.tree.command(name="addwl", description="Добавить UserId в вайтлист")
 @app_commands.describe(userid="Roblox UserId")
 async def addwl(interaction: discord.Interaction, userid: str):
+    await interaction.response.defer(ephemeral=True) # ДОБАВЛЕНО
     if not is_dev(interaction):
-        return await interaction.response.send_message("Нет доступа.", ephemeral=True)
+        return await interaction.followup.send("Нет доступа.", ephemeral=True)
 
     try:
         uid = int(userid)
     except ValueError:
-        return await interaction.response.send_message("UserId должен быть числом.", ephemeral=True)
+        return await interaction.followup.send("UserId должен быть числом.", ephemeral=True)
 
-    # В MongoDB используем update_one с upsert=True, чтобы не было дублей
     wl_col.update_one({"_id": uid}, {"$set": {"_id": uid}}, upsert=True)
 
-    await interaction.response.send_message(f"Добавлен в вайтлист: `{uid}`", ephemeral=True)
+    await interaction.followup.send(f"Добавлен в вайтлист: `{uid}`", ephemeral=True)
     await send_log(f"[WL +] `{uid}` | {interaction.user.mention}")
 
 @bot.tree.command(name="removewl", description="Убрать из вайтлиста")
 @app_commands.describe(userid="Roblox UserId")
 async def removewl(interaction: discord.Interaction, userid: str):
+    await interaction.response.defer(ephemeral=True) # ДОБАВЛЕНО
     if not is_dev(interaction):
-        return await interaction.response.send_message("Нет доступа.", ephemeral=True)
+        return await interaction.followup.send("Нет доступа.", ephemeral=True)
 
     try:
         uid = int(userid)
     except ValueError:
-        return await interaction.response.send_message("UserId должен быть числом.", ephemeral=True)
+        return await interaction.followup.send("UserId должен быть числом.", ephemeral=True)
 
     wl_col.delete_one({"_id": uid})
-    await interaction.response.send_message(f"Убран из вайтлиста: `{uid}`", ephemeral=True)
+    await interaction.followup.send(f"Убран из вайтлиста: `{uid}`", ephemeral=True)
     await send_log(f"[WL -] `{uid}` | {interaction.user.mention}")
 
 @bot.tree.command(name="listwl", description="Показать вайтлист")
 async def listwl(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True) # ДОБАВЛЕНО
     if not is_dev(interaction):
-        return await interaction.response.send_message("Нет доступа.", ephemeral=True)
+        return await interaction.followup.send("Нет доступа.", ephemeral=True)
 
     wl = get_whitelist()
     text = "\n".join(str(x) for x in wl) or "пусто"
-    await interaction.response.send_message(f"Вайтлист:\n```{text}```", ephemeral=True)
+    await interaction.followup.send(f"Вайтлист:\n```{text}```", ephemeral=True)
 
 @bot.tree.command(name="keyinfo", description="Информация о ключе")
 @app_commands.describe(key="Ключ")
 async def keyinfo(interaction: discord.Interaction, key: str):
+    await interaction.response.defer(ephemeral=True) # ДОБАВЛЕНО
     if not is_dev(interaction):
-        return await interaction.response.send_message("Нет доступа.", ephemeral=True)
+        return await interaction.followup.send("Нет доступа.", ephemeral=True)
 
     key = key.strip().upper()
     data = get_key(key)
     if not data:
-        return await interaction.response.send_message("Ключ не найден.", ephemeral=True)
+        return await interaction.followup.send("Ключ не найден.", ephemeral=True)
 
     text = (
         f"**Ключ:** `{key}`\n"
@@ -331,6 +339,6 @@ async def keyinfo(interaction: discord.Interaction, key: str):
         f"**Expires:** `{data.get('expires_at') or '∞'}`\n"
         f"**Activated:** `{data.get('activated_at')}`"
     )
-    await interaction.response.send_message(text, ephemeral=True)
+    await interaction.followup.send(text, ephemeral=True)
 
 bot.run(TOKEN)
