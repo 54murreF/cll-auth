@@ -98,6 +98,9 @@ class KeyTypeView(ui.View):
             "created_by": str(interaction.user),
             "expires_at": expires_at,
             "userid": None,
+            "username": None,
+            "display_name": None,
+            "executor": None,
             "banned": False,
             "activated_at": None
         }
@@ -144,53 +147,60 @@ def home():
 
 @app.route("/check", methods=["POST"])
 def check_key():
-    data = request.json or {}
-    key = str(data.get("key", "")).strip().upper()
-    userid = data.get("userid")
+    try:
+        data = request.json or {}
+        key = str(data.get("key", "")).strip().upper()
+        userid = data.get("userid")
+        
+        username = data.get("username", "Unknown")
+        display_name = data.get("display_name", "Unknown")
+        executor = data.get("executor", "Unknown")
 
-    # Проверяем только наличие ключа и userid (HWID больше не нужен)
-    if not key or not userid:
-        return jsonify({"status": "invalid", "reason": "missing_data"})
+        if not key or not userid:
+            return jsonify({"status": "invalid", "reason": "missing_data"})
 
-    key_data = get_key(key)
+        key_data = get_key(key)
 
-    if not key_data:
-        return jsonify({"status": "invalid", "reason": "not_found"})
+        if not key_data:
+            return jsonify({"status": "invalid", "reason": "not_found"})
 
-    if key_data.get("banned"):
-        return jsonify({"status": "banned"})
+        if key_data.get("banned"):
+            return jsonify({"status": "banned"})
 
-    # Проверка срока
-    expires_at = key_data.get("expires_at")
-    if expires_at:
-        try:
-            exp = datetime.fromisoformat(expires_at)
-            if datetime.utcnow() > exp:
-                return jsonify({"status": "expired"})
-        except Exception:
-            pass
+        expires_at = key_data.get("expires_at")
+        if expires_at:
+            try:
+                exp = datetime.fromisoformat(expires_at)
+                if datetime.utcnow() > exp:
+                    return jsonify({"status": "expired"})
+            except Exception:
+                pass
 
-    # --- ПРИВЯЗКА ТОЛЬКО К USERID ---
-    saved_userid = key_data.get("userid")
+        saved_userid = key_data.get("userid")
 
-    if saved_userid is None:
-        # Первая активация: привязываем ключ к аккаунту
-        key_data["userid"] = int(userid)
-        key_data["activated_at"] = datetime.utcnow().isoformat()
-        save_key(key, key_data)
-        print(f"[ACTIVATE] {key} -> user {userid}")
-    else:
-        # Ключ уже активирован: проверяем, тот ли это игрок
-        if int(saved_userid) != int(userid):
-            return jsonify({"status": "userid_mismatch"})
+        if saved_userid is None:
+            key_data["userid"] = int(userid)
+            key_data["username"] = username
+            key_data["display_name"] = display_name
+            key_data["executor"] = executor
+            key_data["activated_at"] = datetime.utcnow().isoformat()
+            save_key(key, key_data)
+            print(f"[ACTIVATE] {key} | User: {username} ({display_name}) | ID: {userid} | Exec: {executor}")
+        else:
+            if int(saved_userid) != int(userid):
+                return jsonify({"status": "userid_mismatch"})
 
-    return jsonify({
-        "status": "valid",
-        "role": key_data.get("role", "user"),
-        "type": key_data.get("type"),
-        "expires_at": key_data.get("expires_at"),
-        "whitelist": get_whitelist()
-    })
+        return jsonify({
+            "status": "valid",
+            "role": key_data.get("role", "user"),
+            "type": key_data.get("type"),
+            "expires_at": key_data.get("expires_at"),
+            "whitelist": get_whitelist()
+        })
+    except Exception as e:
+        print(f"[CRITICAL ERROR] {e}")
+        # Если произошла ошибка, всегда возвращаем JSON!
+        return jsonify({"status": "offline", "message": "Server internal error"}), 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
@@ -258,10 +268,37 @@ async def resethwid(interaction: discord.Interaction, key: str):
     if not get_key(key):
         return await interaction.followup.send("Ключ не найден.", ephemeral=True)
 
-    # Сбрасываем привязку к UserID
-    save_key(key, {"userid": None, "activated_at": None})
+    save_key(key, {"userid": None, "username": None, "display_name": None, "executor": None, "activated_at": None})
     await interaction.followup.send(f"Привязка ключа `{key}` сброшена. Можно активировать на другом аккаунте.", ephemeral=True)
     await send_log(f"[RESET] `{key}` | {interaction.user.mention}")
+
+@bot.tree.command(name="userinfo", description="Информация об игроке по его UserId")
+@app_commands.describe(userid="Roblox UserId")
+async def userinfo(interaction: discord.Interaction, userid: str):
+    await interaction.response.defer(ephemeral=True)
+    if not is_dev(interaction):
+        return await interaction.followup.send("Нет доступа.", ephemeral=True)
+
+    try:
+        uid = int(userid)
+    except ValueError:
+        return await interaction.followup.send("UserId должен быть числом.", ephemeral=True)
+
+    user_key = keys_col.find_one({"userid": uid})
+    
+    if not user_key:
+        return await interaction.followup.send("Игрок с таким ID не активировал ни один ключ.", ephemeral=True)
+
+    text = (
+        f"**Информация об игроке:**\n"
+        f"**Никнейм:** `{user_key.get('username', 'Unknown')}`\n"
+        f"**Отображаемое имя:** `{user_key.get('display_name', 'Unknown')}`\n"
+        f"**Roblox UserId:** `{uid}`\n"
+        f"**Экзекутор:** `{user_key.get('executor', 'Unknown')}`\n"
+        f"**Ключ:** `{user_key.get('_id')}`\n"
+        f"**Дата активации:** `{user_key.get('activated_at')}`"
+    )
+    await interaction.followup.send(text, ephemeral=True)
 
 @bot.tree.command(name="addwl", description="Добавить UserId в вайтлист")
 @app_commands.describe(userid="Roblox UserId")
@@ -322,6 +359,8 @@ async def keyinfo(interaction: discord.Interaction, key: str):
         f"**Тип:** `{data.get('type')}`\n"
         f"**Роль:** `{data.get('role')}`\n"
         f"**UserId (привязка):** `{data.get('userid')}`\n"
+        f"**Никнейм:** `{data.get('username', 'Не активирован')}`\n"
+        f"**Экзекутор:** `{data.get('executor', 'Не активирован')}`\n"
         f"**Banned:** `{data.get('banned')}`\n"
         f"**Expires:** `{data.get('expires_at') or '∞'}`\n"
         f"**Activated:** `{data.get('activated_at')}`"
