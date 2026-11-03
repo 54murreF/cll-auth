@@ -1,24 +1,38 @@
 import discord
 from discord.ext import commands
 from discord import app_commands, ui
-import json
 import os
 import random
 import string
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from threading import Thread
+from pymongo import MongoClient
 
 # ================== НАСТРОЙКИ ==================
 TOKEN = os.environ["TOKEN"]
+MONGO_URI = os.environ["MONGO_URI"]  # Сюда вставишь ссылку из MongoDB
 
-# ID роли dev на твоём сервере
-DEV_ROLE_ID = 1566118227489071344  # <-- ЗАМЕНИ
-
-# ID канала для логов
-LOG_CHANNEL_ID = 1566120795934040314  # <-- ЗАМЕНИ
-
+DEV_ROLE_ID = 1566118227489071344  # Твой ID роли
+LOG_CHANNEL_ID = 1566120795934040314  # Твой ID канала логов
 # ===============================================
+
+# ---------- Подключение к MongoDB ----------
+client = MongoClient(MONGO_URI)
+db = client["auth_database"]
+keys_col = db["keys"]
+wl_col = db["whitelist"]
+
+def get_key(key):
+    return keys_col.find_one({"_id": key})
+
+def save_key(key, data):
+    keys_col.update_one({"_id": key}, {"$set": data}, upsert=True)
+
+def get_whitelist():
+    return [doc["_id"] for doc in wl_col.find()]
+
+# -------------------------------------------
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -26,21 +40,6 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 app = Flask("")
-
-# ---------- База ----------
-DB_FILE = "database.json"
-
-def load_db():
-    if not os.path.exists(DB_FILE):
-        data = {"keys": {}, "whitelist": []}
-        save_db(data)
-        return data
-    with open(DB_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def save_db(data):
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
 
 def generate_key():
     parts = []
@@ -90,8 +89,7 @@ class KeyTypeView(ui.View):
         if info["days"]:
             expires_at = (now + timedelta(days=info["days"])).isoformat()
 
-        db = load_db()
-        db["keys"][key] = {
+        key_data = {
             "role": info["role"],
             "type": key_type,
             "created_at": now.isoformat(),
@@ -102,7 +100,7 @@ class KeyTypeView(ui.View):
             "banned": False,
             "activated_at": None
         }
-        save_db(db)
+        save_key(key, key_data)
 
         expires_text = "∞" if not expires_at else expires_at[:10]
 
@@ -155,8 +153,7 @@ def check_key():
     if not key or not userid or not hwid:
         return jsonify({"status": "invalid", "reason": "missing_data"})
 
-    db = load_db()
-    key_data = db["keys"].get(key)
+    key_data = get_key(key)
 
     if not key_data:
         return jsonify({"status": "invalid", "reason": "not_found"})
@@ -179,9 +176,8 @@ def check_key():
         key_data["hwid"] = hwid
         key_data["userid"] = int(userid)
         key_data["activated_at"] = datetime.utcnow().isoformat()
-        save_db(db)
+        save_key(key, key_data)
 
-        # Лог активации (через print, т.к. Flask в другом потоке)
         print(f"[ACTIVATE] {key} -> user {userid} | hwid {hwid[:8]}...")
 
         return jsonify({
@@ -189,14 +185,13 @@ def check_key():
             "role": key_data.get("role", "user"),
             "type": key_data.get("type"),
             "expires_at": key_data.get("expires_at"),
-            "whitelist": db.get("whitelist", [])
+            "whitelist": get_whitelist() # Берем актуальный вайтлист из базы
         })
 
     # Уже активирован — проверяем HWID
     if key_data.get("hwid") != hwid:
         return jsonify({"status": "hwid_mismatch"})
 
-    # Опционально можно жёстко проверять и UserId
     if key_data.get("userid") and int(key_data["userid"]) != int(userid):
         return jsonify({"status": "userid_mismatch"})
 
@@ -205,7 +200,7 @@ def check_key():
         "role": key_data.get("role", "user"),
         "type": key_data.get("type"),
         "expires_at": key_data.get("expires_at"),
-        "whitelist": db.get("whitelist", [])
+        "whitelist": get_whitelist() # Берем актуальный вайтлист из базы
     })
 
 def run_flask():
@@ -230,11 +225,7 @@ async def genkey(interaction: discord.Interaction):
         return await interaction.response.send_message("Нет доступа. Нужна роль dev.", ephemeral=True)
 
     view = KeyTypeView(interaction.user.id)
-    await interaction.response.send_message(
-        "Выберите тип ключа:",
-        view=view,
-        ephemeral=True
-    )
+    await interaction.response.send_message("Выберите тип ключа:", view=view, ephemeral=True)
 
 @bot.tree.command(name="ban", description="Забанить ключ")
 @app_commands.describe(key="Ключ")
@@ -243,12 +234,10 @@ async def ban_key(interaction: discord.Interaction, key: str):
         return await interaction.response.send_message("Нет доступа.", ephemeral=True)
 
     key = key.strip().upper()
-    db = load_db()
-    if key not in db["keys"]:
+    if not get_key(key):
         return await interaction.response.send_message("Ключ не найден.", ephemeral=True)
 
-    db["keys"][key]["banned"] = True
-    save_db(db)
+    save_key(key, {"banned": True})
     await interaction.response.send_message(f"Ключ `{key}` забанен.", ephemeral=True)
     await send_log(f"[БАН] `{key}` | {interaction.user.mention}")
 
@@ -259,12 +248,10 @@ async def unban_key(interaction: discord.Interaction, key: str):
         return await interaction.response.send_message("Нет доступа.", ephemeral=True)
 
     key = key.strip().upper()
-    db = load_db()
-    if key not in db["keys"]:
+    if not get_key(key):
         return await interaction.response.send_message("Ключ не найден.", ephemeral=True)
 
-    db["keys"][key]["banned"] = False
-    save_db(db)
+    save_key(key, {"banned": False})
     await interaction.response.send_message(f"Ключ `{key}` разбанен.", ephemeral=True)
     await send_log(f"[РАЗБАН] `{key}` | {interaction.user.mention}")
 
@@ -275,16 +262,11 @@ async def resethwid(interaction: discord.Interaction, key: str):
         return await interaction.response.send_message("Нет доступа.", ephemeral=True)
 
     key = key.strip().upper()
-    db = load_db()
-    if key not in db["keys"]:
+    if not get_key(key):
         return await interaction.response.send_message("Ключ не найден.", ephemeral=True)
 
-    db["keys"][key]["hwid"] = None
-    db["keys"][key]["userid"] = None
-    db["keys"][key]["activated_at"] = None
-    save_db(db)
-
-    await interaction.response.send_message(f"HWID ключа `{key}` сброшен. Можно активировать заново.", ephemeral=True)
+    save_key(key, {"hwid": None, "userid": None, "activated_at": None})
+    await interaction.response.send_message(f"HWID ключа `{key}` сброшен.", ephemeral=True)
     await send_log(f"[RESET HWID] `{key}` | {interaction.user.mention}")
 
 @bot.tree.command(name="addwl", description="Добавить UserId в вайтлист")
@@ -298,10 +280,8 @@ async def addwl(interaction: discord.Interaction, userid: str):
     except ValueError:
         return await interaction.response.send_message("UserId должен быть числом.", ephemeral=True)
 
-    db = load_db()
-    if uid not in db["whitelist"]:
-        db["whitelist"].append(uid)
-        save_db(db)
+    # В MongoDB используем update_one с upsert=True, чтобы не было дублей
+    wl_col.update_one({"_id": uid}, {"$set": {"_id": uid}}, upsert=True)
 
     await interaction.response.send_message(f"Добавлен в вайтлист: `{uid}`", ephemeral=True)
     await send_log(f"[WL +] `{uid}` | {interaction.user.mention}")
@@ -317,11 +297,7 @@ async def removewl(interaction: discord.Interaction, userid: str):
     except ValueError:
         return await interaction.response.send_message("UserId должен быть числом.", ephemeral=True)
 
-    db = load_db()
-    if uid in db["whitelist"]:
-        db["whitelist"].remove(uid)
-        save_db(db)
-
+    wl_col.delete_one({"_id": uid})
     await interaction.response.send_message(f"Убран из вайтлиста: `{uid}`", ephemeral=True)
     await send_log(f"[WL -] `{uid}` | {interaction.user.mention}")
 
@@ -330,8 +306,8 @@ async def listwl(interaction: discord.Interaction):
     if not is_dev(interaction):
         return await interaction.response.send_message("Нет доступа.", ephemeral=True)
 
-    db = load_db()
-    text = "\n".join(str(x) for x in db["whitelist"]) or "пусто"
+    wl = get_whitelist()
+    text = "\n".join(str(x) for x in wl) or "пусто"
     await interaction.response.send_message(f"Вайтлист:\n```{text}```", ephemeral=True)
 
 @bot.tree.command(name="keyinfo", description="Информация о ключе")
@@ -341,8 +317,7 @@ async def keyinfo(interaction: discord.Interaction, key: str):
         return await interaction.response.send_message("Нет доступа.", ephemeral=True)
 
     key = key.strip().upper()
-    db = load_db()
-    data = db["keys"].get(key)
+    data = get_key(key)
     if not data:
         return await interaction.response.send_message("Ключ не найден.", ephemeral=True)
 
