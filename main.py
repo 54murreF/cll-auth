@@ -13,15 +13,15 @@ from pymongo import MongoClient
 TOKEN = os.environ["TOKEN"]
 MONGO_URI = os.environ["MONGO_URI"]
 
-DEV_ROLE_ID = 1566118227489071344  # Твой ID роли
-LOG_CHANNEL_ID = 1566120795934040314  # Твой ID канала логов
+DEV_ROLE_ID = 1566118227489071344
+LOG_CHANNEL_ID = 1566120795934040314
 # ===============================================
 
-# ---------- Подключение к MongoDB ----------
 client = MongoClient(MONGO_URI)
 db = client["auth_database"]
 keys_col = db["keys"]
 wl_col = db["whitelist"]
+bl_col = db["blacklist"]
 
 def get_key(key):
     return keys_col.find_one({"_id": key})
@@ -32,7 +32,8 @@ def save_key(key, data):
 def get_whitelist():
     return [doc["_id"] for doc in wl_col.find()]
 
-# -------------------------------------------
+def get_blacklist():
+    return [doc["_id"] for doc in bl_col.find()]
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -59,7 +60,6 @@ async def send_log(text: str):
         except Exception:
             pass
 
-# ---------- Типы ключей ----------
 KEY_TYPES = {
     "tester": {"role": "tester", "days": None, "label": "Tester — ∞"},
     "dev": {"role": "dev", "days": None, "label": "Dev — ∞"},
@@ -68,7 +68,6 @@ KEY_TYPES = {
     "user_30d": {"role": "user", "days": 30, "label": "User — 30 дней"},
 }
 
-# ---------- View с кнопками ----------
 class KeyTypeView(ui.View):
     def __init__(self, author_id: int):
         super().__init__(timeout=60)
@@ -140,7 +139,6 @@ class KeyTypeView(ui.View):
     async def user30(self, interaction: discord.Interaction, button: ui.Button):
         await self.create_key(interaction, "user_30d")
 
-# ---------- Flask API ----------
 @app.route("/")
 def home():
     return "CLL Auth Online"
@@ -151,7 +149,7 @@ def check_key():
         data = request.json or {}
         key = str(data.get("key", "")).strip().upper()
         userid = data.get("userid")
-        
+
         username = data.get("username", "Unknown")
         display_name = data.get("display_name", "Unknown")
         executor = data.get("executor", "Unknown")
@@ -184,7 +182,9 @@ def check_key():
             key_data["display_name"] = display_name
             key_data["executor"] = executor
             key_data["activated_at"] = datetime.utcnow().isoformat()
-            save_key(key, key_data)
+            # не сохраняем служебное _id из find_one как поле заново криво
+            to_save = {k: v for k, v in key_data.items() if k != "_id"}
+            save_key(key, to_save)
             print(f"[ACTIVATE] {key} | User: {username} ({display_name}) | ID: {userid} | Exec: {executor}")
         else:
             if int(saved_userid) != int(userid):
@@ -195,11 +195,11 @@ def check_key():
             "role": key_data.get("role", "user"),
             "type": key_data.get("type"),
             "expires_at": key_data.get("expires_at"),
-            "whitelist": get_whitelist()
+            "whitelist": get_whitelist(),
+            "blacklist": get_blacklist()
         })
     except Exception as e:
         print(f"[CRITICAL ERROR] {e}")
-        # Если произошла ошибка, всегда возвращаем JSON!
         return jsonify({"status": "offline", "message": "Server internal error"}), 200
 
 def run_flask():
@@ -208,7 +208,6 @@ def run_flask():
 
 Thread(target=run_flask).start()
 
-# ---------- Discord команды ----------
 @bot.event
 async def on_ready():
     print(f"Бот запущен: {bot.user}")
@@ -268,8 +267,17 @@ async def resethwid(interaction: discord.Interaction, key: str):
     if not get_key(key):
         return await interaction.followup.send("Ключ не найден.", ephemeral=True)
 
-    save_key(key, {"userid": None, "username": None, "display_name": None, "executor": None, "activated_at": None})
-    await interaction.followup.send(f"Привязка ключа `{key}` сброшена. Можно активировать на другом аккаунте.", ephemeral=True)
+    save_key(key, {
+        "userid": None,
+        "username": None,
+        "display_name": None,
+        "executor": None,
+        "activated_at": None
+    })
+    await interaction.followup.send(
+        f"Привязка ключа `{key}` сброшена. Можно активировать на другом аккаунте.",
+        ephemeral=True
+    )
     await send_log(f"[RESET] `{key}` | {interaction.user.mention}")
 
 @bot.tree.command(name="userinfo", description="Информация об игроке по его UserId")
@@ -285,7 +293,7 @@ async def userinfo(interaction: discord.Interaction, userid: str):
         return await interaction.followup.send("UserId должен быть числом.", ephemeral=True)
 
     user_key = keys_col.find_one({"userid": uid})
-    
+
     if not user_key:
         return await interaction.followup.send("Игрок с таким ID не активировал ни один ключ.", ephemeral=True)
 
@@ -296,6 +304,9 @@ async def userinfo(interaction: discord.Interaction, userid: str):
         f"**Roblox UserId:** `{uid}`\n"
         f"**Экзекутор:** `{user_key.get('executor', 'Unknown')}`\n"
         f"**Ключ:** `{user_key.get('_id')}`\n"
+        f"**Роль:** `{user_key.get('role')}`\n"
+        f"**Тип:** `{user_key.get('type')}`\n"
+        f"**Expires:** `{user_key.get('expires_at') or '∞'}`\n"
         f"**Дата активации:** `{user_key.get('activated_at')}`"
     )
     await interaction.followup.send(text, ephemeral=True)
@@ -313,6 +324,8 @@ async def addwl(interaction: discord.Interaction, userid: str):
         return await interaction.followup.send("UserId должен быть числом.", ephemeral=True)
 
     wl_col.update_one({"_id": uid}, {"$set": {"_id": uid}}, upsert=True)
+    # если был в BL — убрать конфликт
+    bl_col.delete_one({"_id": uid})
     await interaction.followup.send(f"Добавлен в вайтлист: `{uid}`", ephemeral=True)
     await send_log(f"[WL +] `{uid}` | {interaction.user.mention}")
 
@@ -341,6 +354,49 @@ async def listwl(interaction: discord.Interaction):
     wl = get_whitelist()
     text = "\n".join(str(x) for x in wl) or "пусто"
     await interaction.followup.send(f"Вайтлист:\n```{text}```", ephemeral=True)
+
+@bot.tree.command(name="addbl", description="Добавить UserId в блеклист (авто-цель SUK)")
+@app_commands.describe(userid="Roblox UserId")
+async def addbl(interaction: discord.Interaction, userid: str):
+    await interaction.response.defer(ephemeral=True)
+    if not is_dev(interaction):
+        return await interaction.followup.send("Нет доступа.", ephemeral=True)
+
+    try:
+        uid = int(userid)
+    except ValueError:
+        return await interaction.followup.send("UserId должен быть числом.", ephemeral=True)
+
+    bl_col.update_one({"_id": uid}, {"$set": {"_id": uid}}, upsert=True)
+    wl_col.delete_one({"_id": uid})  # WL приоритетнее, убираем конфликт
+    await interaction.followup.send(f"Добавлен в блеклист: `{uid}`", ephemeral=True)
+    await send_log(f"[BL +] `{uid}` | {interaction.user.mention}")
+
+@bot.tree.command(name="removebl", description="Убрать из блеклиста")
+@app_commands.describe(userid="Roblox UserId")
+async def removebl(interaction: discord.Interaction, userid: str):
+    await interaction.response.defer(ephemeral=True)
+    if not is_dev(interaction):
+        return await interaction.followup.send("Нет доступа.", ephemeral=True)
+
+    try:
+        uid = int(userid)
+    except ValueError:
+        return await interaction.followup.send("UserId должен быть числом.", ephemeral=True)
+
+    bl_col.delete_one({"_id": uid})
+    await interaction.followup.send(f"Убран из блеклиста: `{uid}`", ephemeral=True)
+    await send_log(f"[BL -] `{uid}` | {interaction.user.mention}")
+
+@bot.tree.command(name="listbl", description="Показать блеклист")
+async def listbl(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    if not is_dev(interaction):
+        return await interaction.followup.send("Нет доступа.", ephemeral=True)
+
+    bl = get_blacklist()
+    text = "\n".join(str(x) for x in bl) or "пусто"
+    await interaction.followup.send(f"Блеклист:\n```{text}```", ephemeral=True)
 
 @bot.tree.command(name="keyinfo", description="Информация о ключе")
 @app_commands.describe(key="Ключ")
