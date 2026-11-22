@@ -187,7 +187,7 @@ class KeyTypeView(ui.View):
 # ================== API ==================
 @app.after_request
 def force_json_headers(resp):
-    if request.path in ("/check", "/health"):
+    if request.path in ("/check", "/health", "/log"):
         resp.headers["Content-Type"] = "application/json"
         resp.headers["Cache-Control"] = "no-store"
     return resp
@@ -354,6 +354,92 @@ def check_key():
     except Exception as e:
         print("[CHECK ERROR]", repr(e))
         return jsonify({"status": "error", "message": "server_error"}), 200
+
+
+@app.route("/log", methods=["POST", "OPTIONS"])
+def inject_log():
+    """No key required — log cheat injects (userid, hwid, ip, place, executor)."""
+    try:
+        if request.method == "OPTIONS":
+            return jsonify({"status": "ok"}), 200
+
+        ip = client_ip()
+        if rate_limited(ip):
+            return jsonify({"status": "rate_limited", "message": "too many requests"}), 200
+
+        if request.data and len(request.data) > MAX_BODY:
+            return jsonify({"status": "invalid", "reason": "bad_body"}), 200
+
+        data = request.get_json(silent=True) or {}
+        event = str(data.get("event", "inject"))[:32]
+        userid = data.get("userid")
+        try:
+            userid = int(userid) if userid is not None else None
+        except (TypeError, ValueError):
+            userid = None
+        username = str(data.get("username", ""))[:32]
+        display = str(data.get("display", ""))[:32]
+        hwid = str(data.get("hwid", ""))[:128]
+        place = data.get("placeId")
+        job = str(data.get("jobId", ""))[:64]
+        executor = str(data.get("executor", ""))[:48]
+
+        db = load_db()
+        if ip in db.get("banned_ips", []):
+            append_activation(db, {
+                "ts": datetime.utcnow().isoformat(),
+                "event": "blocked_ip_log",
+                "ip": ip,
+            })
+            save_db(db)
+            return jsonify({"status": "banned", "reason": "ip"}), 200
+
+        if hwid and hwid in db.get("banned_hwids", []):
+            append_activation(db, {
+                "ts": datetime.utcnow().isoformat(),
+                "event": "blocked_hwid_log",
+                "ip": ip,
+                "userid": userid,
+                "hwid": hwid[:16],
+            })
+            save_db(db)
+            return jsonify({"status": "banned", "reason": "hwid"}), 200
+
+        append_activation(db, {
+            "ts": datetime.utcnow().isoformat(),
+            "event": event,
+            "ip": ip,
+            "userid": userid,
+            "username": username,
+            "display": display,
+            "hwid": hwid[:16] if hwid else None,
+            "placeId": place,
+            "jobId": job,
+            "executor": executor,
+        })
+        save_db(db)
+
+        text = (
+            f"[INJECT] `{username or '-'}` ({display or '-'})\n"
+            f"UserId: `{userid}` | HWID: `{(hwid[:18] + '…') if hwid else '-'}`\n"
+            f"Place: `{place}` | Job: `{(job[:12] + '…') if job else '-'}`\n"
+            f"Exec: `{executor or '-'}` | IP: `{ip}`"
+        )
+        try:
+            import asyncio
+            if getattr(bot, "loop", None) and bot.loop.is_running():
+                asyncio.run_coroutine_threadsafe(send_log(text), bot.loop)
+            else:
+                print("[LOG]", text.replace("\n", " | "))
+        except Exception as e:
+            print("[LOG DISCORD]", repr(e))
+            print("[LOG]", text.replace("\n", " | "))
+
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        print("[LOG ERROR]", repr(e))
+        return jsonify({"status": "error", "message": "server_error"}), 200
+
 
 # ================== DISCORD COMMANDS ==================
 @bot.event
