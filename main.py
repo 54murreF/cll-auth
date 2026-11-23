@@ -187,7 +187,7 @@ class KeyTypeView(ui.View):
 # ================== API ==================
 @app.after_request
 def force_json_headers(resp):
-    if request.path in ("/check", "/health", "/log"):
+    if request.path in ("/check", "/health", "/log", "/whitelist"):
         resp.headers["Content-Type"] = "application/json"
         resp.headers["Cache-Control"] = "no-store"
     return resp
@@ -199,6 +199,26 @@ def home():
 @app.route("/health")
 def health():
     return jsonify({"status": "ok", "ts": datetime.utcnow().isoformat()})
+
+@app.route("/whitelist", methods=["GET", "OPTIONS"])
+def get_whitelist():
+    """Public list of Roblox userIds protected from SUK/VR target (script polls this)."""
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"}), 200
+    try:
+        db = load_db()
+        raw = db.get("whitelist", []) or []
+        out = []
+        for x in raw:
+            try:
+                out.append({"id": int(x), "name": str(x)})
+            except Exception:
+                pass
+        return jsonify({"list": out, "count": len(out)}), 200
+    except Exception as e:
+        print("[WL GET ERROR]", repr(e))
+        return jsonify({"list": [], "error": "server_error"}), 200
+
 
 @app.route("/check", methods=["POST", "OPTIONS"])
 def check_key():
